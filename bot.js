@@ -3,16 +3,12 @@ import express from 'express';
 import { WebhookClient, EmbedBuilder } from 'discord.js';
 import fetch from 'node-fetch';
 
-// ── Config ───────────────────────────────────────────────────────────────────
 const PORT            = process.env.PORT || 3000;
 const DISCORD_FRESH   = process.env.DISCORD_WEBHOOK_FRESH;
 const DISCORD_DORMANT = process.env.DISCORD_WEBHOOK_DORMANT;
 const HELIUS_KEY      = process.env.HELIUS_API_KEY;
-const DORMANT_DAYS    = parseInt(process.env.DORMANT_DAYS || '20');
-const FRESH_DAYS      = parseInt(process.env.FRESH_DAYS   || '7');
 const SOL_MINT        = 'So11111111111111111111111111111111111111112';
 
-// ── Dedupe ───────────────────────────────────────────────────────────────────
 const recentlySeen = new Map();
 function isDupe(wallet, mint) {
   const key = `${wallet}:${mint}`;
@@ -22,11 +18,12 @@ function isDupe(wallet, mint) {
   return false;
 }
 
-// ── Discord webhook clients ──────────────────────────────────────────────────
-const freshHook   = DISCORD_FRESH   ? new WebhookClient({ url: DISCORD_FRESH })   : null;
-const dormantHook = DISCORD_DORMANT ? new WebhookClient({ url: DISCORD_DORMANT }) : null;
+const hook = DISCORD_FRESH
+  ? new WebhookClient({ url: DISCORD_FRESH })
+  : DISCORD_DORMANT
+    ? new WebhookClient({ url: DISCORD_DORMANT })
+    : null;
 
-// ── Token info (DexScreener) ─────────────────────────────────────────────────
 async function getTokenInfo(mint) {
   try {
     const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
@@ -45,7 +42,6 @@ async function getTokenInfo(mint) {
   } catch { return null; }
 }
 
-// ── Wallet profile (Helius) ──────────────────────────────────────────────────
 async function getWalletProfile(address) {
   try {
     const url = `https://api-mainnet.helius-rpc.com/v0/addresses/${address}/transactions?api-key=${HELIUS_KEY}&limit=100`;
@@ -83,7 +79,6 @@ async function getWalletProfile(address) {
       firstTxTimestamp: oldest,
       lastTxTimestamp:  newest,
       txCount:          txs.length,
-      mightBeOlder:     txs.length === 100,
       fundedStr,
       solBalance,
       dormantDays: (Date.now() - newest) / 86_400_000,
@@ -91,16 +86,6 @@ async function getWalletProfile(address) {
   } catch { return null; }
 }
 
-function classifyWallet(profile) {
-  if (!profile || profile.txCount === 0) return 'fresh';
-  const ageDays    = (Date.now() - profile.firstTxTimestamp) / 86_400_000;
-  const dormant    = (Date.now() - profile.lastTxTimestamp)  / 86_400_000;
-  if (ageDays  <= FRESH_DAYS)   return 'fresh';
-  if (dormant  >= DORMANT_DAYS) return 'dormant';
-  return null;
-}
-
-// ── Embed builder ────────────────────────────────────────────────────────────
 function fmtMcap(n) {
   if (!n && n !== 0) return 'N/A';
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
@@ -108,15 +93,13 @@ function fmtMcap(n) {
   return `$${n.toFixed(2)}`;
 }
 
-function shortAddr(addr) { return `${addr.slice(0,4)}…${addr.slice(-4)}`; }
+function shortAddr(addr) { return `${addr.slice(0,4)}\u2026${addr.slice(-4)}`; }
 
-function buildEmbed({ wallet, token, mint, swapSol, profile, color }) {
+function buildEmbed({ wallet, token, mint, swapSol, profile }) {
   const wAgeDays = profile?.firstTxTimestamp
-    ? Math.floor((Date.now() - profile.firstTxTimestamp) / 86_400_000)
-    : null;
+    ? Math.floor((Date.now() - profile.firstTxTimestamp) / 86_400_000) : null;
   const tAgeDays = token?.pairCreatedAt
-    ? Math.floor((Date.now() - token.pairCreatedAt) / 86_400_000)
-    : null;
+    ? Math.floor((Date.now() - token.pairCreatedAt) / 86_400_000) : null;
 
   const tags = [];
   if (token?.mcap && token.mcap < 500_000) tags.push('LOW MC');
@@ -126,27 +109,25 @@ function buildEmbed({ wallet, token, mint, swapSol, profile, color }) {
   const solBal = profile?.solBalance != null ? `${profile.solBalance.toFixed(2)} SOL` : 'N/A';
 
   return new EmbedBuilder()
-    .setColor(color)
-    .setAuthor({ name: tags.join(' · ') || 'SIGNAL' })
+    .setColor(0x00e5ff)
+    .setAuthor({ name: tags.join(' · ') || 'TEST SIGNAL' })
     .setTitle(`🐋 ${token?.name || shortAddr(mint)} · ${swapSol ? swapSol + ' SOL' : 'N/A'}`)
     .setThumbnail(token?.imageUrl || null)
     .addFields(
-      { name: '🪙 Token', value: '​', inline: false },
+      { name: '🪙 Token', value: '\u200b', inline: false },
       { name: 'MC',       value: fmtMcap(token?.mcap),                      inline: true },
       { name: 'Age',      value: tAgeDays != null ? `${tAgeDays}d` : 'N/A', inline: true },
-      { name: 'Contract', value: `\`${mint}\``,                              inline: false },
-
+      { name: 'Contract', value: `\`${mint}\``,                            inline: false },
       { name: '👛 Wallet', value:
           `[👤 ${shortAddr(wallet)}](https://solscan.io/account/${wallet})\n` +
           `Age ${wAgeDays != null ? wAgeDays + 'd' : '?'} · Tx ${profile?.txCount ?? '?'}\n` +
           `Funded ${profile?.fundedStr ?? '—'}`,
-        inline: false
-      },
-      { name: 'SOL Balance', value: solBal,                                          inline: true },
-      { name: 'Buy Amount',  value: swapSol ? `${swapSol} SOL` : 'N/A',             inline: true },
+        inline: false },
+      { name: 'SOL Balance', value: solBal,                                inline: true },
+      { name: 'Buy Amount',  value: swapSol ? `${swapSol} SOL` : 'N/A',   inline: true },
       { name: 'Dormant',     value: profile?.dormantDays != null ? `${Math.round(profile.dormantDays)}d` : '—', inline: true },
     )
-    .setFooter({ text: `${token?.venue || 'pump.fun'} · ${new Date().toUTCString()}` })
+    .setFooter({ text: `${token?.venue || 'pump.fun'} · TEST MODE · ${new Date().toUTCString()}` })
     .setTimestamp();
 }
 
@@ -160,27 +141,23 @@ function buildComponents(mint, sig) {
   }];
 }
 
-// ── Helius webhook handler ───────────────────────────────────────────────────
 async function handleHeliusEvent(events) {
   if (!Array.isArray(events)) events = [events];
-
   for (const event of events) {
     if (event.type !== 'SWAP') continue;
-
-    const swap   = event.swap;
     const wallet = event.feePayer;
     const sig    = event.signature;
     if (!wallet) continue;
 
     let mint = null;
     let swapSol = null;
+    const swap = event.swap;
 
     if (swap?.tokenInputs?.length && swap?.tokenOutputs?.length) {
       const outMint = swap.tokenOutputs[0]?.mint;
       const inMint  = swap.tokenInputs[0]?.mint;
-      if (outMint && outMint !== SOL_MINT)      mint = outMint;
-      else if (inMint && inMint !== SOL_MINT)   mint = inMint;
-
+      if (outMint && outMint !== SOL_MINT)    mint = outMint;
+      else if (inMint && inMint !== SOL_MINT) mint = inMint;
       const nativeDelta = event.accountData?.find(a => a.account === wallet)?.nativeBalanceChange;
       if (nativeDelta) swapSol = Math.abs(nativeDelta / 1e9).toFixed(3);
     }
@@ -188,45 +165,28 @@ async function handleHeliusEvent(events) {
     if (!mint) continue;
     if (isDupe(wallet, mint)) continue;
 
-    console.log(`[SCAN] wallet=${wallet.slice(0,8)}… mint=${mint.slice(0,8)}…`);
+    console.log(`[TEST] wallet=${wallet.slice(0,8)}… mint=${mint.slice(0,8)}…`);
 
-    const profile = await getWalletProfile(wallet);
-    const type    = classifyWallet(profile);
-    if (!type) continue;
-
+    const profile    = await getWalletProfile(wallet);
     const token      = await getTokenInfo(mint);
     const components = buildComponents(mint, sig);
+    const embed      = buildEmbed({ wallet, token, mint, swapSol, profile });
 
-    if (type === 'fresh' && freshHook) {
-      const embed = buildEmbed({ wallet, token, mint, swapSol, profile, color: 0x00e5ff });
-      await freshHook.send({ embeds: [embed], components }).catch(console.error);
-      console.log(`[FRESH] sent for ${wallet.slice(0,8)}…`);
-    }
-
-    if (type === 'dormant' && dormantHook) {
-      const embed = buildEmbed({ wallet, token, mint, swapSol, profile, color: 0xff9800 });
-      await dormantHook.send({ embeds: [embed], components }).catch(console.error);
-      console.log(`[DORMANT] sent for ${wallet.slice(0,8)}… (${Math.round(profile?.dormantDays || DORMANT_DAYS)}d idle)`);
-    }
+    if (hook) await hook.send({ embeds: [embed], components }).catch(console.error);
+    console.log(`[TEST] alert sent!`);
   }
 }
 
-// ── Express server ───────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
-
-app.get('/', (_req, res) => res.json({ status: 'ok', service: 'dormant-freshie-tracker' }));
-
+app.get('/', (_req, res) => res.json({ status: 'ok', mode: 'TEST — no filters' }));
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try { await handleHeliusEvent(req.body); }
-  catch (err) { console.error('[WEBHOOK ERROR]', err.message); }
+  catch (err) { console.error('[ERROR]', err.message); }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ dormant-FREshie-tracker running on port ${PORT}`);
-  console.log(`   Fresh webhook:     ${freshHook   ? '✓' : '✗ NOT SET'}`);
-  console.log(`   Dormant webhook:   ${dormantHook ? '✓' : '✗ NOT SET'}`);
-  console.log(`   Dormant threshold: ${DORMANT_DAYS}d`);
-  console.log(`   Fresh threshold:   ${FRESH_DAYS}d`);
+  console.log(`✅ TEST MODE — no filters, every swap fires`);
+  console.log(`   Webhook: ${hook ? '✓' : '✗ NOT SET'}`);
 });
